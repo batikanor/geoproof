@@ -13,6 +13,8 @@ type StacPicked = {
   bbox: BBox | null;
   tileUrlTemplate?: string | null;
   tileBounds?: BBox | null;
+  tileMinZoom?: number | null;
+  tileMaxZoom?: number | null;
 };
 
 type StacResponse = {
@@ -21,12 +23,27 @@ type StacResponse = {
     startDate: string;
     endDate: string;
     collection: string;
+    maxCloudOffsetDays: number;
     totalCandidates: number;
   };
   before: StacPicked;
   after: StacPicked;
+  beforeClear: StacPicked | null;
+  afterClear: StacPicked | null;
   error?: string;
 };
+
+type Variant = "closest" | "clearest";
+
+function pickVariant(stac: StacResponse, v: Variant) {
+  if (v === "clearest") {
+    return {
+      before: stac.beforeClear ?? stac.before,
+      after: stac.afterClear ?? stac.after,
+    };
+  }
+  return { before: stac.before, after: stac.after };
+}
 
 function fmt(dt: string | null) {
   if (!dt) return "—";
@@ -88,15 +105,21 @@ export function GeoProofApp() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [stac, setStac] = useState<StacResponse | null>(null);
+  const [stacS2, setStacS2] = useState<StacResponse | null>(null);
+  const [stacLandsat, setStacLandsat] = useState<StacResponse | null>(null);
+  const [secondaryWarning, setSecondaryWarning] = useState<string | null>(null);
+
+  const [variant, setVariant] = useState<Variant>("clearest");
+  const [maxCloudOffsetDays, setMaxCloudOffsetDays] = useState<number>(14);
+  const [showSecondary, setShowSecondary] = useState<boolean>(true);
 
   const [threshold, setThreshold] = useState<number>(40);
   const [diffStats, setDiffStats] = useState<DiffStats | null>(null);
 
   const [tileZoom, setTileZoom] = useState<number>(16);
 
-  const beforeUrl = stac?.before.previewUrl ?? null;
-  const afterUrl = stac?.after.previewUrl ?? null;
+  const primary = stacS2;
+  const primaryPicked = useMemo(() => (primary ? pickVariant(primary, variant) : null), [primary, variant]);
 
   const effectiveBbox = useMemo(() => {
     if (mode === "bbox") return bbox;
@@ -131,17 +154,18 @@ export function GeoProofApp() {
   }, [mode, fromCoord, toCoord]);
 
   const reportDraft = useMemo(() => {
-    if (!effectiveBbox || !stac || !diffStats) return null;
+    if (!effectiveBbox || !primary || !primaryPicked || !diffStats) return null;
     return {
       type: "GeoProofChangeReportDraft",
       version: 1,
       createdAt: new Date().toISOString(),
       bbox: effectiveBbox,
       window: { startDate, endDate },
-      collection: stac.query.collection,
+      collection: primary.query.collection,
       imagery: {
-        before: stac.before,
-        after: stac.after,
+        variant,
+        before: primaryPicked.before,
+        after: primaryPicked.after,
       },
       diff: {
         threshold,
@@ -155,12 +179,14 @@ export function GeoProofApp() {
         sui: "TODO",
       },
     };
-  }, [effectiveBbox, stac, diffStats, startDate, endDate, threshold]);
+  }, [effectiveBbox, primary, primaryPicked, diffStats, startDate, endDate, threshold, variant]);
 
   const runSearch = useCallback(async () => {
     setError(null);
-    setStac(null);
+    setStacS2(null);
+    setStacLandsat(null);
     setDiffStats(null);
+    setSecondaryWarning(null);
 
     if (!effectiveBbox) {
       if (mode === "bbox") {
@@ -175,42 +201,85 @@ export function GeoProofApp() {
 
     setLoading(true);
     try {
-      const res = await fetch("/api/stac/search", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ bbox: effectiveBbox, startDate, endDate }),
-      });
+      const s2Promise = fetch("/api/stac/search", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            bbox: effectiveBbox,
+            startDate,
+            endDate,
+            collection: "sentinel-2-l2a",
+            maxCloudOffsetDays,
+          }),
+        });
 
-      const raw = (await res.json()) as unknown;
-      if (!res.ok) {
+      const lsPromise = showSecondary
+        ? fetch("/api/stac/search", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              bbox: effectiveBbox,
+              startDate,
+              endDate,
+              collection: "landsat-c2-l2",
+              maxCloudOffsetDays,
+            }),
+          })
+        : null;
+
+      const results = await Promise.allSettled([s2Promise, ...(lsPromise ? [lsPromise] : [])]);
+      const s2 = results[0];
+      const ls = results.length > 1 ? results[1] : null;
+
+      if (s2.status !== "fulfilled") {
+        setError(`Sentinel-2 request error: ${String(s2.reason)}`);
+        return;
+      }
+
+      const resS2 = s2.value;
+      const rawS2 = (await resS2.json()) as unknown;
+      if (!resS2.ok) {
         const msg =
-          typeof raw === "object" && raw !== null && typeof (raw as { error?: unknown }).error === "string"
-            ? (raw as { error: string }).error
-            : `Request failed: ${res.status}`;
+          typeof rawS2 === "object" && rawS2 !== null && typeof (rawS2 as { error?: unknown }).error === "string"
+            ? (rawS2 as { error: string }).error
+            : `Sentinel-2 request failed: ${resS2.status}`;
         setError(msg);
         return;
       }
 
-      const json = raw as StacResponse;
+      setStacS2(rawS2 as StacResponse);
 
-      if (!json.before?.previewUrl || !json.after?.previewUrl) {
-        setError("STAC response did not include preview URLs.");
-        return;
+      if (ls) {
+        if (ls.status === "fulfilled") {
+          const resLs = ls.value;
+          const rawLs = (await resLs.json()) as unknown;
+          if (resLs.ok) {
+            setStacLandsat(rawLs as StacResponse);
+          } else {
+            const msg =
+              typeof rawLs === "object" && rawLs !== null && typeof (rawLs as { error?: unknown }).error === "string"
+                ? (rawLs as { error: string }).error
+                : `Landsat request failed: ${resLs.status}`;
+            setSecondaryWarning(msg);
+          }
+        } else {
+          setSecondaryWarning(`Landsat request error: ${String(ls.reason)}`);
+        }
       }
-
-      setStac(json);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
     } finally {
       setLoading(false);
     }
-  }, [effectiveBbox, mode, startDate, endDate]);
+  }, [effectiveBbox, mode, startDate, endDate, maxCloudOffsetDays, showSecondary]);
 
   const onMapClick = useCallback(
     (coord: [number, number]) => {
       setError(null);
-      setStac(null);
+      setStacS2(null);
+      setStacLandsat(null);
+      setSecondaryWarning(null);
       setDiffStats(null);
 
       if (mode === "bbox") {
@@ -278,6 +347,11 @@ export function GeoProofApp() {
                   <button
                     type="button"
                     onClick={() => {
+                      setError(null);
+                      setStacS2(null);
+                      setStacLandsat(null);
+                      setSecondaryWarning(null);
+                      setDiffStats(null);
                       setMode("bbox");
                       setBboxAnchor(null);
                       setCenterCoord(null);
@@ -298,6 +372,11 @@ export function GeoProofApp() {
                   <button
                     type="button"
                     onClick={() => {
+                      setError(null);
+                      setStacS2(null);
+                      setStacLandsat(null);
+                      setSecondaryWarning(null);
+                      setDiffStats(null);
                       setMode("radius");
                       setBboxAnchor(null);
                       setFromCoord(null);
@@ -316,6 +395,11 @@ export function GeoProofApp() {
                   <button
                     type="button"
                     onClick={() => {
+                      setError(null);
+                      setStacS2(null);
+                      setStacLandsat(null);
+                      setSecondaryWarning(null);
+                      setDiffStats(null);
                       setMode("fromTo");
                       setBboxAnchor(null);
                       setCenterCoord(null);
@@ -350,7 +434,9 @@ export function GeoProofApp() {
                     onChange={(p) => {
                       setCenterPlace(p);
                       setCenterCoord(p ? p.coord : null);
-                      setStac(null);
+                      setStacS2(null);
+                      setStacLandsat(null);
+                      setSecondaryWarning(null);
                       setDiffStats(null);
                     }}
                   />
@@ -393,7 +479,9 @@ export function GeoProofApp() {
                     onChange={(p) => {
                       setFromPlace(p);
                       setFromCoord(p ? p.coord : null);
-                      setStac(null);
+                      setStacS2(null);
+                      setStacLandsat(null);
+                      setSecondaryWarning(null);
                       setDiffStats(null);
                     }}
                   />
@@ -404,7 +492,9 @@ export function GeoProofApp() {
                     onChange={(p) => {
                       setToPlace(p);
                       setToCoord(p ? p.coord : null);
-                      setStac(null);
+                      setStacS2(null);
+                      setStacLandsat(null);
+                      setSecondaryWarning(null);
                       setDiffStats(null);
                     }}
                   />
@@ -433,6 +523,65 @@ export function GeoProofApp() {
                 </div>
               </div>
 
+              <div className="mt-3 rounded-xl border border-zinc-200 bg-white p-3">
+                <div className="text-xs font-medium text-zinc-900">Cloud handling + sources</div>
+                <div className="mt-2 grid gap-2 text-xs text-zinc-700">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="variant"
+                      checked={variant === "closest"}
+                      onChange={() => {
+                        setVariant("closest");
+                        setDiffStats(null);
+                      }}
+                    />
+                    Closest to your chosen dates (may be cloudy)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="variant"
+                      checked={variant === "clearest"}
+                      onChange={() => {
+                        setVariant("clearest");
+                        setDiffStats(null);
+                      }}
+                    />
+                    Clearest (lowest cloud) within ±{maxCloudOffsetDays} days
+                  </label>
+
+                  <div className="mt-1">
+                    <div className="mb-1 text-xs font-medium text-zinc-700">Clearest search window (days)</div>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="range"
+                        min={0}
+                        max={45}
+                        step={1}
+                        value={maxCloudOffsetDays}
+                        onChange={(e) => setMaxCloudOffsetDays(Number(e.target.value))}
+                        className="w-full"
+                      />
+                      <div className="w-10 text-right font-mono text-xs text-zinc-700">{maxCloudOffsetDays}</div>
+                    </div>
+                  </div>
+
+                  <label className="mt-1 flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={showSecondary}
+                      onChange={(e) => {
+                        setShowSecondary(e.target.checked);
+                        setStacLandsat(null);
+                        setSecondaryWarning(null);
+                      }}
+                    />
+                    Also fetch Landsat (alternate source)
+                  </label>
+                </div>
+              </div>
+
               <div className="mt-3 flex items-center gap-2">
                 <button
                   onClick={runSearch}
@@ -444,7 +593,9 @@ export function GeoProofApp() {
                 <button
                   onClick={() => {
                     setError(null);
-                    setStac(null);
+                    setStacS2(null);
+                    setStacLandsat(null);
+                    setSecondaryWarning(null);
                     setDiffStats(null);
 
                     if (mode === "bbox") {
@@ -566,43 +717,142 @@ export function GeoProofApp() {
               <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">{error}</div>
             ) : null}
 
-            {stac ? (
-              <div className="rounded-xl border border-zinc-200 bg-white p-4">
-                <div className="mb-2 text-sm font-medium text-zinc-900">Selected imagery (Sentinel-2 L2A)</div>
-                <div className="mb-3 text-xs text-zinc-500">
-                  Note: Planetary Computer previews are for the full Sentinel-2 granule; we crop them to your selected bbox
-                  using the item bbox (approx) so the before/after/diff is scoped to your region.
-                </div>
-                <div className="grid gap-3 text-xs text-zinc-700 md:grid-cols-2">
-                  <div className="rounded-lg border border-zinc-100 bg-zinc-50 p-3">
-                    <div className="mb-1 font-medium text-zinc-900">Before</div>
-                    <div className="font-mono">{stac.before.id}</div>
-                    <div className="mt-1">{fmt(stac.before.datetime)}</div>
-                    {stac.before.cloudCover != null ? <div>Cloud: {stac.before.cloudCover}</div> : null}
-                  </div>
-                  <div className="rounded-lg border border-zinc-100 bg-zinc-50 p-3">
-                    <div className="mb-1 font-medium text-zinc-900">After</div>
-                    <div className="font-mono">{stac.after.id}</div>
-                    <div className="mt-1">{fmt(stac.after.datetime)}</div>
-                    {stac.after.cloudCover != null ? <div>Cloud: {stac.after.cloudCover}</div> : null}
-                  </div>
-                </div>
-                <div className="mt-2 text-xs text-zinc-500">Candidates scanned: {stac.query.totalCandidates}</div>
+            {secondaryWarning ? (
+              <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900">
+                {secondaryWarning}
               </div>
             ) : null}
 
-            <DiffViewer
-              beforeUrl={beforeUrl}
-              afterUrl={afterUrl}
-              selectionBbox={effectiveBbox}
-              beforeItemBbox={stac?.before.bbox ?? null}
-              afterItemBbox={stac?.after.bbox ?? null}
-              beforeTileUrlTemplate={stac?.before.tileUrlTemplate ?? null}
-              afterTileUrlTemplate={stac?.after.tileUrlTemplate ?? null}
-              tileZoom={tileZoom}
-              threshold={threshold}
-              onComputed={setDiffStats}
-            />
+            {stacS2 ? (
+              <div className="rounded-xl border border-zinc-200 bg-white p-4">
+                <div className="flex items-baseline justify-between gap-3">
+                  <div className="text-sm font-medium text-zinc-900">Sentinel-2 (Planetary Computer)</div>
+                  <div className="text-xs text-zinc-500">Candidates scanned: {stacS2.query.totalCandidates}</div>
+                </div>
+                <div className="mt-2 text-xs text-zinc-500">
+                  We show two picks: (1) closest-to-date (may be cloudy) and (2) clearest within ±
+                  {stacS2.query.maxCloudOffsetDays} days.
+                </div>
+
+                <div className="mt-3 grid gap-3 text-xs text-zinc-700 md:grid-cols-2">
+                  <div className="rounded-lg border border-zinc-100 bg-zinc-50 p-3">
+                    <div className="mb-2 font-medium text-zinc-900">Closest</div>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <div>
+                        <div className="text-zinc-500">Before</div>
+                        <div className="font-mono">{stacS2.before.id}</div>
+                        <div>{fmt(stacS2.before.datetime)}</div>
+                        {stacS2.before.cloudCover != null ? <div>Cloud: {stacS2.before.cloudCover}</div> : null}
+                      </div>
+                      <div>
+                        <div className="text-zinc-500">After</div>
+                        <div className="font-mono">{stacS2.after.id}</div>
+                        <div>{fmt(stacS2.after.datetime)}</div>
+                        {stacS2.after.cloudCover != null ? <div>Cloud: {stacS2.after.cloudCover}</div> : null}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-zinc-100 bg-zinc-50 p-3">
+                    <div className="mb-2 font-medium text-zinc-900">Clearest</div>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <div>
+                        <div className="text-zinc-500">Before</div>
+                        <div className="font-mono">{(stacS2.beforeClear ?? stacS2.before).id}</div>
+                        <div>{fmt((stacS2.beforeClear ?? stacS2.before).datetime)}</div>
+                        {(stacS2.beforeClear ?? stacS2.before).cloudCover != null ? (
+                          <div>Cloud: {(stacS2.beforeClear ?? stacS2.before).cloudCover}</div>
+                        ) : null}
+                      </div>
+                      <div>
+                        <div className="text-zinc-500">After</div>
+                        <div className="font-mono">{(stacS2.afterClear ?? stacS2.after).id}</div>
+                        <div>{fmt((stacS2.afterClear ?? stacS2.after).datetime)}</div>
+                        {(stacS2.afterClear ?? stacS2.after).cloudCover != null ? (
+                          <div>Cloud: {(stacS2.afterClear ?? stacS2.after).cloudCover}</div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {stacS2 && effectiveBbox ? (
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-xl border border-zinc-200 bg-white p-3">
+                  <div className="mb-2 text-xs font-medium text-zinc-700">Closest</div>
+                  <DiffViewer
+                    beforeUrl={stacS2.before.previewUrl}
+                    afterUrl={stacS2.after.previewUrl}
+                    selectionBbox={effectiveBbox}
+                    beforeItemBbox={stacS2.before.bbox}
+                    afterItemBbox={stacS2.after.bbox}
+                    beforeTileUrlTemplate={stacS2.before.tileUrlTemplate ?? null}
+                    afterTileUrlTemplate={stacS2.after.tileUrlTemplate ?? null}
+                    tileZoom={tileZoom}
+                    threshold={threshold}
+                    onComputed={variant === "closest" ? setDiffStats : undefined}
+                  />
+                </div>
+
+                <div className="rounded-xl border border-zinc-200 bg-white p-3">
+                  <div className="mb-2 text-xs font-medium text-zinc-700">Clearest</div>
+                  <DiffViewer
+                    beforeUrl={(stacS2.beforeClear ?? stacS2.before).previewUrl}
+                    afterUrl={(stacS2.afterClear ?? stacS2.after).previewUrl}
+                    selectionBbox={effectiveBbox}
+                    beforeItemBbox={(stacS2.beforeClear ?? stacS2.before).bbox}
+                    afterItemBbox={(stacS2.afterClear ?? stacS2.after).bbox}
+                    beforeTileUrlTemplate={(stacS2.beforeClear ?? stacS2.before).tileUrlTemplate ?? null}
+                    afterTileUrlTemplate={(stacS2.afterClear ?? stacS2.after).tileUrlTemplate ?? null}
+                    tileZoom={tileZoom}
+                    threshold={threshold}
+                    onComputed={variant === "clearest" ? setDiffStats : undefined}
+                  />
+                </div>
+              </div>
+            ) : null}
+
+            {showSecondary && stacLandsat ? (
+              <div className="rounded-xl border border-zinc-200 bg-white p-4">
+                <div className="flex items-baseline justify-between gap-3">
+                  <div className="text-sm font-medium text-zinc-900">Landsat (alternate source)</div>
+                  <div className="text-xs text-zinc-500">Candidates scanned: {stacLandsat.query.totalCandidates}</div>
+                </div>
+                <div className="mt-2 grid gap-4 md:grid-cols-2">
+                  <div className="rounded-xl border border-zinc-200 bg-white p-3">
+                    <div className="mb-2 text-xs font-medium text-zinc-700">Closest</div>
+                    <DiffViewer
+                      beforeUrl={stacLandsat.before.previewUrl}
+                      afterUrl={stacLandsat.after.previewUrl}
+                      selectionBbox={effectiveBbox}
+                      beforeItemBbox={stacLandsat.before.bbox}
+                      afterItemBbox={stacLandsat.after.bbox}
+                      beforeTileUrlTemplate={stacLandsat.before.tileUrlTemplate ?? null}
+                      afterTileUrlTemplate={stacLandsat.after.tileUrlTemplate ?? null}
+                      tileZoom={tileZoom}
+                      threshold={threshold}
+                    />
+                  </div>
+
+                  <div className="rounded-xl border border-zinc-200 bg-white p-3">
+                    <div className="mb-2 text-xs font-medium text-zinc-700">Clearest</div>
+                    <DiffViewer
+                      beforeUrl={(stacLandsat.beforeClear ?? stacLandsat.before).previewUrl}
+                      afterUrl={(stacLandsat.afterClear ?? stacLandsat.after).previewUrl}
+                      selectionBbox={effectiveBbox}
+                      beforeItemBbox={(stacLandsat.beforeClear ?? stacLandsat.before).bbox}
+                      afterItemBbox={(stacLandsat.afterClear ?? stacLandsat.after).bbox}
+                      beforeTileUrlTemplate={(stacLandsat.beforeClear ?? stacLandsat.before).tileUrlTemplate ?? null}
+                      afterTileUrlTemplate={(stacLandsat.afterClear ?? stacLandsat.after).tileUrlTemplate ?? null}
+                      tileZoom={tileZoom}
+                      threshold={threshold}
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
