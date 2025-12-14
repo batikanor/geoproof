@@ -172,12 +172,21 @@ export function GeoProofApp() {
     | {
         network: string;
         address: string;
-        balances: { SUI: { total: string }; WAL: { total: string } };
+        balances: { SUI: { total: string; coinType?: string }; WAL: { total: string; coinType?: string } };
       }
     | { error: string }
     | null
   >(null);
-  const [includeArtifacts, setIncludeArtifacts] = useState<boolean>(false);
+
+  type ArtifactsMode = "none" | "diff" | "all";
+  const [artifactsMode, setArtifactsMode] = useState<ArtifactsMode>("none");
+
+  type PublishEstimateOk = {
+    bytes: { evidenceBundle: number };
+    walrus: { cost: { totalCost: string } | null; resolved: { derivedWalType: string | null } };
+    wallet: { walBalances: Record<string, string> };
+  };
+  const [publishEstimate, setPublishEstimate] = useState<PublishEstimateOk | { error: string } | null>(null);
 
   const [waybackComputeNonce, setWaybackComputeNonce] = useState<number>(0);
 
@@ -665,7 +674,7 @@ export function GeoProofApp() {
         body: JSON.stringify({
           reportDraft,
           artifacts: activeComputed.artifacts ?? undefined,
-          includeArtifacts,
+          artifactsMode,
         }),
       });
 
@@ -686,7 +695,7 @@ export function GeoProofApp() {
     } finally {
       setPublishLoading(false);
     }
-  }, [activeComputed.artifacts, reportDraft, includeArtifacts]);
+  }, [activeComputed.artifacts, reportDraft, artifactsMode]);
 
   const diffStats = activeComputed.stats;
 
@@ -735,7 +744,14 @@ export function GeoProofApp() {
           if (!cancelled) setPublishBalance({ error: msg });
           return;
         }
-        if (!cancelled) setPublishBalance(raw as { network: string; address: string; balances: { SUI: { total: string }; WAL: { total: string } } });
+        if (!cancelled)
+          setPublishBalance(
+            raw as {
+              network: string;
+              address: string;
+              balances: { SUI: { total: string; coinType?: string }; WAL: { total: string; coinType?: string } };
+            },
+          );
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         if (!cancelled) setPublishBalance({ error: msg });
@@ -745,6 +761,47 @@ export function GeoProofApp() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const t = setTimeout(() => {
+      (async () => {
+        if (!reportDraft) {
+          if (!cancelled) setPublishEstimate(null);
+          return;
+        }
+        try {
+          const res = await fetch("/api/publish/estimate", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              reportDraft,
+              artifacts: activeComputed.artifacts ?? undefined,
+              artifactsMode,
+            }),
+          });
+          const raw = (await res.json()) as unknown;
+          if (!res.ok) {
+            const msg =
+              typeof raw === "object" && raw !== null && "error" in raw && typeof (raw as { error?: unknown }).error === "string"
+                ? (raw as { error: string }).error
+                : `HTTP ${res.status}`;
+            if (!cancelled) setPublishEstimate({ error: msg });
+            return;
+          }
+          if (!cancelled) setPublishEstimate(raw as PublishEstimateOk);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (!cancelled) setPublishEstimate({ error: msg });
+        }
+      })();
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [reportDraft, activeComputed.artifacts, artifactsMode]);
 
   const publishDisabledReasons = useMemo(() => {
     const reasons: string[] = [];
@@ -776,6 +833,27 @@ export function GeoProofApp() {
     if (publishDiag?.error) reasons.push(`Publish config check failed: ${publishDiag.error}`);
     if (publishDiag?.missingEnv?.length) reasons.push(`Missing server env vars: ${publishDiag.missingEnv.join(", ")}`);
 
+    if (publishEstimate) {
+      if ("error" in publishEstimate) {
+        reasons.push(`Publish estimate failed: ${publishEstimate.error}`);
+      } else {
+        const derivedWalType = publishEstimate.walrus.resolved.derivedWalType;
+        const totalCost = publishEstimate.walrus.cost?.totalCost ?? null;
+        if (derivedWalType && totalCost) {
+          const have = publishEstimate.wallet.walBalances[derivedWalType] ?? "0";
+          try {
+            if (BigInt(have) < BigInt(totalCost)) {
+              reasons.push(
+                `Insufficient WAL for current Walrus deployment (needs WAL of type ${derivedWalType.slice(0, 10)}...).`,
+              );
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
     return reasons;
   }, [
     publishLoading,
@@ -796,6 +874,7 @@ export function GeoProofApp() {
     lsClearestStats,
     lsClosestStats,
     publishDiag,
+    publishEstimate,
   ]);
 
   return (
@@ -1344,16 +1423,58 @@ export function GeoProofApp() {
                       <span className="font-mono text-zinc-200">{(Number(publishBalance.balances.SUI.total) / 1e9).toFixed(3)}</span> SUI,
                       <span className="ml-1 font-mono text-zinc-200">{(Number(publishBalance.balances.WAL.total) / 1e9).toFixed(3)}</span> WAL
                     </div>
+                    {publishBalance.balances.WAL.coinType ? (
+                      <div>
+                        WAL type: <span className="font-mono text-zinc-200">{publishBalance.balances.WAL.coinType}</span>
+                      </div>
+                    ) : null}
                   </div>
                 )}
               </div>
 
-              <label className="mt-3 flex items-center gap-2 text-xs text-zinc-200">
-                <input type="checkbox" checked={includeArtifacts} onChange={(e) => setIncludeArtifacts(e.target.checked)} />
-                Include images in Walrus bundle (costs WAL)
-              </label>
+              <div className="mt-3 grid gap-2">
+                <div className="text-xs font-medium text-zinc-200">Walrus bundle contents</div>
+                <select
+                  value={artifactsMode}
+                  onChange={(e) => setArtifactsMode(e.target.value as "none" | "diff" | "all")}
+                  className="h-9 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 text-xs text-zinc-200"
+                >
+                  <option value="none">Metadata only (recommended)</option>
+                  <option value="diff">Include diff mask only</option>
+                  <option value="all">Include before + after + diff images</option>
+                </select>
+                <div className="text-[11px] leading-4 text-zinc-500">
+                  Larger bundles cost more WAL and may fail if your WAL type doesn’t match the configured Walrus deployment.
+                </div>
+
+                <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-200">
+                  <div className="font-medium text-zinc-300">Estimate</div>
+                  {publishEstimate == null ? (
+                    <div className="mt-1 text-zinc-500">Waiting for a report draft…</div>
+                  ) : "error" in publishEstimate ? (
+                    <div className="mt-1 text-red-200">{publishEstimate.error}</div>
+                  ) : (
+                    <div className="mt-1 space-y-1 text-zinc-400">
+                      <div>
+                        Bundle size: <span className="font-mono text-zinc-200">{(publishEstimate.bytes.evidenceBundle / 1024).toFixed(1)} KB</span>
+                      </div>
+                      <div>
+                        Expected WAL type: <span className="font-mono text-zinc-200">{publishEstimate.walrus.resolved.derivedWalType ?? "(unknown)"}</span>
+                      </div>
+                      <div>
+                        Est. WAL cost (epochs):{" "}
+                        <span className="font-mono text-zinc-200">
+                          {publishEstimate.walrus.cost?.totalCost
+                            ? (Number(publishEstimate.walrus.cost.totalCost) / 1e9).toFixed(3)
+                            : "(unavailable)"}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
               <button
-                disabled={!reportDraft || publishLoading}
+                disabled={publishDisabledReasons.length > 0 || publishLoading}
                 onClick={doPublish}
                   className="mt-3 inline-flex h-10 w-full items-center justify-center rounded-lg bg-zinc-100 text-sm font-medium text-zinc-950 disabled:opacity-50"
               >
@@ -1370,15 +1491,13 @@ export function GeoProofApp() {
                 </button>
               ) : null}
 
-              {!reportDraft && !publishLoading ? (
+              {publishDisabledReasons.length && !publishLoading ? (
                 <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-200">
                   <div className="font-medium text-zinc-300">Why is Publish disabled?</div>
                   <ul className="mt-2 list-disc space-y-1 pl-5 text-zinc-400">
-                    {publishDisabledReasons.length ? (
-                      publishDisabledReasons.map((r) => <li key={r}>{r}</li>)
-                    ) : (
-                      <li>Unknown (report draft is missing).</li>
-                    )}
+                    {publishDisabledReasons.map((r) => (
+                      <li key={r}>{r}</li>
+                    ))}
                   </ul>
                 </div>
               ) : null}

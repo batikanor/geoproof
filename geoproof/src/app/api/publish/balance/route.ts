@@ -39,19 +39,20 @@ export async function GET() {
     const all = await client.getAllBalances({ owner: address });
     const sui = all.find((b) => b.coinType === SUI_COIN_TYPE) ?? { coinType: SUI_COIN_TYPE, totalBalance: "0" };
 
-    // WAL coin type changes across Walrus deployments; don't hardcode package ids.
-    // Instead, find any coin type ending with ::wal::WAL.
-    const wal =
-      all.find((b) => b.coinType.endsWith("::wal::WAL")) ??
-      // Fallback (older deployments): some builds used `...::wal::WAL` with different package ids.
-      { coinType: "::wal::WAL", totalBalance: "0" };
+    const walBalances = all.filter((b) => b.coinType.endsWith("::wal::WAL"));
+    const walTotal = walBalances.reduce((acc, b) => acc + BigInt(b.totalBalance), BigInt(0)).toString();
+    const walByType = Object.fromEntries(walBalances.map((b) => [b.coinType, b.totalBalance]));
 
     return NextResponse.json({
       network,
       address,
       balances: {
         SUI: { total: sui.totalBalance, coinType: sui.coinType },
-        WAL: { total: wal.totalBalance, coinType: wal.coinType },
+        WAL: {
+          total: walTotal,
+          coinType: walBalances[0]?.coinType ?? null,
+          byType: walByType,
+        },
       },
     });
   } catch (e: unknown) {
