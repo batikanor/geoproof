@@ -957,7 +957,6 @@ export function GeoProofApp() {
                           checked={primarySource === "wayback"}
                           onChange={() => {
                             setPrimarySource("wayback");
-                            resetComputed();
                           }}
                         />
                         Wayback (cloud-free)
@@ -969,7 +968,6 @@ export function GeoProofApp() {
                           checked={primarySource === "sentinel-2-l2a"}
                           onChange={() => {
                             setPrimarySource("sentinel-2-l2a");
-                            resetComputed();
                           }}
                         />
                         Sentinel-2
@@ -982,7 +980,6 @@ export function GeoProofApp() {
                           disabled={!showSecondary}
                           onChange={() => {
                             setPrimarySource("landsat-c2-l2");
-                            resetComputed();
                           }}
                         />
                         Landsat
@@ -999,7 +996,6 @@ export function GeoProofApp() {
                           checked={ignoreClouds}
                           onChange={(e) => {
                             setIgnoreClouds(e.target.checked);
-                            resetComputed();
                           }}
                         />
                         Ignore cloud-like pixels
@@ -1010,7 +1006,6 @@ export function GeoProofApp() {
                           checked={ignoreDark}
                           onChange={(e) => {
                             setIgnoreDark(e.target.checked);
-                            resetComputed();
                           }}
                         />
                         Ignore very-dark pixels
@@ -1026,7 +1021,6 @@ export function GeoProofApp() {
                       disabled={primarySource === "wayback"}
                       onChange={() => {
                         setVariant("closest");
-                        resetComputed();
                       }}
                     />
                     Closest to your chosen dates (may be cloudy)
@@ -1039,7 +1033,6 @@ export function GeoProofApp() {
                       disabled={primarySource === "wayback"}
                       onChange={() => {
                         setVariant("clearest");
-                        resetComputed();
                       }}
                     />
                     Clearest (lowest cloud) within ±{maxCloudOffsetDays} days
