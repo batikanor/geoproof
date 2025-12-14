@@ -195,6 +195,166 @@ export function GeoProofApp() {
 
   const [tileZoom, setTileZoom] = useState<number>(16);
 
+  type ChainReportItem = {
+    objectId: string;
+    digest: string;
+    createdAtMs?: number;
+    startDate?: string;
+    endDate?: string;
+    source?: string;
+    variant?: string;
+    walrusBlobId?: string;
+    reportSha256Hex?: string;
+    bboxParsed?: [number, number, number, number] | null;
+    owner?: unknown;
+  };
+
+  const [reportsTab, setReportsTab] = useState<"region" | "all">("region");
+  const [regionReports, setRegionReports] = useState<ChainReportItem[] | null>(null);
+  const [allReports, setAllReports] = useState<ChainReportItem[] | null>(null);
+  const [reportsError, setReportsError] = useState<string | null>(null);
+  const [watchRegion, setWatchRegion] = useState<boolean>(false);
+  const [newReportsCount, setNewReportsCount] = useState<number>(0);
+  const [lastSeenReportId, setLastSeenReportId] = useState<string | null>(null);
+  const [selectedReport, setSelectedReport] = useState<ChainReportItem | null>(null);
+  const [selectedReportBlob, setSelectedReportBlob] = useState<unknown | null>(null);
+  const [selectedReportBlobError, setSelectedReportBlobError] = useState<string | null>(null);
+
+  const effectiveBboxKey = useMemo(() => {
+    const bb = (() => {
+      if (mode === "bbox") return bbox;
+      if (mode === "radius" && centerCoord) return bboxFromCenterRadius(centerCoord, radiusKm);
+      if (mode === "fromTo" && fromCoord && toCoord) return bboxFromTwoPoints(fromCoord, toCoord);
+      return null;
+    })();
+    if (!bb) return null;
+    return bb.map((n) => n.toFixed(6)).join(",");
+  }, [mode, bbox, centerCoord, radiusKm, fromCoord, toCoord]);
+
+  const fetchRegionReports = useCallback(
+    async (silent: boolean) => {
+      if (!effectiveBboxKey) {
+        setRegionReports(null);
+        return;
+      }
+      try {
+        if (!silent) setReportsError(null);
+        const res = await fetch(`/api/reports/search?bbox=${encodeURIComponent(effectiveBboxKey)}&limit=25`, {
+          method: "GET",
+        });
+        const raw = (await res.json()) as unknown;
+        if (!res.ok) {
+          const msg =
+            typeof raw === "object" && raw !== null && "error" in raw && typeof (raw as { error?: unknown }).error === "string"
+              ? (raw as { error: string }).error
+              : `HTTP ${res.status}`;
+          setReportsError(msg);
+          return;
+        }
+        const items = (() => {
+          if (typeof raw !== "object" || raw === null) return [] as ChainReportItem[];
+          const v = (raw as Record<string, unknown>).items;
+          if (!Array.isArray(v)) return [] as ChainReportItem[];
+          return v as ChainReportItem[];
+        })();
+        setRegionReports(items);
+
+        // Watch mode: count new reports since last seen.
+        if (watchRegion) {
+          const newest = items[0]?.objectId ?? null;
+          if (!lastSeenReportId) {
+            setLastSeenReportId(newest);
+            setNewReportsCount(0);
+          } else if (newest && newest !== lastSeenReportId) {
+            const idx = items.findIndex((it) => it.objectId === lastSeenReportId);
+            const count = idx >= 0 ? idx : items.length;
+            setNewReportsCount(count);
+          }
+        } else {
+          setNewReportsCount(0);
+          setLastSeenReportId(items[0]?.objectId ?? null);
+        }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setReportsError(msg);
+      }
+    },
+    [effectiveBboxKey, watchRegion, lastSeenReportId],
+  );
+
+  const fetchAllReports = useCallback(async () => {
+    try {
+      setReportsError(null);
+      const res = await fetch(`/api/reports/search?limit=50`, { method: "GET" });
+      const raw = (await res.json()) as unknown;
+      if (!res.ok) {
+        const msg =
+          typeof raw === "object" && raw !== null && "error" in raw && typeof (raw as { error?: unknown }).error === "string"
+            ? (raw as { error: string }).error
+            : `HTTP ${res.status}`;
+        setReportsError(msg);
+        return;
+      }
+      const items = (() => {
+        if (typeof raw !== "object" || raw === null) return [] as ChainReportItem[];
+        const v = (raw as Record<string, unknown>).items;
+        if (!Array.isArray(v)) return [] as ChainReportItem[];
+        return v as ChainReportItem[];
+      })();
+      setAllReports(items);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setReportsError(msg);
+    }
+  }, []);
+
+  useEffect(() => {
+    // Load region feed when bbox changes (debounced elsewhere already via map interactions).
+    fetchRegionReports(false);
+    setSelectedReport(null);
+    setSelectedReportBlob(null);
+    setSelectedReportBlobError(null);
+    setNewReportsCount(0);
+    setLastSeenReportId(null);
+  }, [fetchRegionReports]);
+
+  useEffect(() => {
+    if (!watchRegion) return;
+    const id = setInterval(() => {
+      void fetchRegionReports(true);
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [watchRegion, fetchRegionReports]);
+
+  useEffect(() => {
+    if (!selectedReport?.walrusBlobId) return;
+    const blobId = selectedReport.walrusBlobId;
+    let cancelled = false;
+    setSelectedReportBlob(null);
+    setSelectedReportBlobError(null);
+    (async () => {
+      try {
+        const res = await fetch(`/api/walrus/read?blobId=${encodeURIComponent(blobId)}`, { method: "GET" });
+        const raw = (await res.json()) as unknown;
+        if (!res.ok) {
+          const msg =
+            typeof raw === "object" && raw !== null && "error" in raw && typeof (raw as { error?: unknown }).error === "string"
+              ? (raw as { error: string }).error
+              : `HTTP ${res.status}`;
+          if (!cancelled) setSelectedReportBlobError(msg);
+          return;
+        }
+        if (!cancelled) setSelectedReportBlob(raw);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!cancelled) setSelectedReportBlobError(msg);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedReport?.walrusBlobId]);
+
   const resetComputed = useCallback(() => {
     setWaybackStats(null);
     setWaybackArtifacts(null);
@@ -701,6 +861,15 @@ export function GeoProofApp() {
   }, [activeComputed.artifacts, reportDraft, artifactsMode]);
 
   const diffStats = activeComputed.stats;
+
+  const fmtDateTime = useCallback((ms?: number) => {
+    if (!ms || !Number.isFinite(ms)) return "";
+    try {
+      return new Date(ms).toLocaleString();
+    } catch {
+      return String(ms);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1404,6 +1573,147 @@ export function GeoProofApp() {
               </div>
               <div className="mt-2 text-xs text-zinc-500">
                 If the bbox is large, we may automatically zoom out to keep tile downloads reasonable.
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div className="text-sm font-medium text-zinc-100">Reports</div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void fetchRegionReports(false);
+                      if (reportsTab === "all") void fetchAllReports();
+                    }}
+                    className="inline-flex h-8 items-center justify-center rounded-md border border-zinc-800 bg-zinc-950 px-2 text-xs text-zinc-200"
+                  >
+                    Refresh
+                  </button>
+                  <label className="flex items-center gap-2 text-xs text-zinc-300">
+                    <input type="checkbox" checked={watchRegion} onChange={(e) => setWatchRegion(e.target.checked)} />
+                    Watch region
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setReportsTab("region")}
+                  className={
+                    reportsTab === "region"
+                      ? "inline-flex h-8 items-center rounded-md bg-zinc-100 px-3 text-xs font-medium text-zinc-950"
+                      : "inline-flex h-8 items-center rounded-md border border-zinc-800 bg-zinc-950 px-3 text-xs text-zinc-200"
+                  }
+                >
+                  This region
+                  {newReportsCount > 0 ? (
+                    <span className="ml-2 rounded-full bg-zinc-950/90 px-2 py-0.5 text-[11px] text-zinc-100">
+                      +{newReportsCount}
+                    </span>
+                  ) : null}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReportsTab("all");
+                    void fetchAllReports();
+                  }}
+                  className={
+                    reportsTab === "all"
+                      ? "inline-flex h-8 items-center rounded-md bg-zinc-100 px-3 text-xs font-medium text-zinc-950"
+                      : "inline-flex h-8 items-center rounded-md border border-zinc-800 bg-zinc-950 px-3 text-xs text-zinc-200"
+                  }
+                >
+                  Explore
+                </button>
+              </div>
+
+              {reportsError ? (
+                <div className="mt-3 rounded-lg border border-red-900/40 bg-red-950/40 p-3 text-xs text-red-200">
+                  {reportsError}
+                </div>
+              ) : null}
+
+              <div className="mt-3 grid gap-3">
+                <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                  <div className="text-xs font-medium text-zinc-200">
+                    {reportsTab === "region" ? "Recent reports for selected region" : "Recent reports (all regions)"}
+                  </div>
+                  <div className="mt-2 grid gap-2">
+                    {(reportsTab === "region" ? regionReports : allReports) == null ? (
+                      <div className="text-xs text-zinc-500">Loading…</div>
+                    ) : (reportsTab === "region" ? regionReports : allReports)!.length === 0 ? (
+                      <div className="text-xs text-zinc-500">No reports found yet.</div>
+                    ) : (
+                      (reportsTab === "region" ? regionReports : allReports)!.map((r) => (
+                        <button
+                          key={r.objectId}
+                          type="button"
+                          onClick={() => {
+                            setSelectedReport(r);
+                            setNewReportsCount(0);
+                            setLastSeenReportId(r.objectId);
+                          }}
+                          className={
+                            selectedReport?.objectId === r.objectId
+                              ? "w-full rounded-md border border-zinc-700 bg-zinc-900 p-2 text-left"
+                              : "w-full rounded-md border border-zinc-800 bg-zinc-950 p-2 text-left hover:bg-zinc-900"
+                          }
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-xs text-zinc-200">
+                              <span className="font-medium">{r.source ?? "unknown"}</span>
+                              {r.variant ? <span className="text-zinc-500"> · {r.variant}</span> : null}
+                              {r.startDate && r.endDate ? <span className="text-zinc-500"> · {r.startDate}→{r.endDate}</span> : null}
+                            </div>
+                            <div className="text-[11px] text-zinc-500">{fmtDateTime(r.createdAtMs)}</div>
+                          </div>
+                          <div className="mt-1 font-mono text-[11px] leading-4 text-zinc-500 break-all">{r.objectId}</div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {selectedReport ? (
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                    <div className="text-xs font-medium text-zinc-200">Selected report</div>
+                    <div className="mt-2 grid gap-2 text-xs text-zinc-400">
+                      <div>
+                        Sui object: <span className="font-mono text-[11px] text-zinc-200 break-all">{selectedReport.objectId}</span>
+                      </div>
+                      {selectedReport.walrusBlobId ? (
+                        <div>
+                          Walrus blob: <span className="font-mono text-[11px] text-zinc-200 break-all">{selectedReport.walrusBlobId}</span>
+                        </div>
+                      ) : null}
+                      {selectedReport.reportSha256Hex ? (
+                        <div>
+                          Draft hash: <span className="font-mono text-[11px] text-zinc-200 break-all">{selectedReport.reportSha256Hex}</span>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {selectedReport.walrusBlobId ? (
+                      <div className="mt-3">
+                        <div className="text-xs font-medium text-zinc-200">Evidence bundle (from Walrus)</div>
+                        {selectedReportBlobError ? (
+                          <div className="mt-2 rounded-md border border-red-900/40 bg-red-950/40 p-2 text-xs text-red-200">
+                            {selectedReportBlobError}
+                          </div>
+                        ) : selectedReportBlob ? (
+                          <pre className="mt-2 max-h-56 overflow-auto rounded-md border border-zinc-800 bg-zinc-950 p-2 text-[11px] leading-4 text-zinc-100">
+                            {JSON.stringify(selectedReportBlob, null, 2)}
+                          </pre>
+                        ) : (
+                          <div className="mt-2 text-xs text-zinc-500">Loading…</div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
 
