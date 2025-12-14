@@ -169,6 +169,8 @@ export function GeoProofApp() {
   const [publishResult, setPublishResult] = useState<unknown | null>(null);
   const [publishDiag, setPublishDiag] = useState<{ missingEnv: string[]; error: string | null } | null>(null);
 
+  const [waybackComputeNonce, setWaybackComputeNonce] = useState<number>(0);
+
   const [tileZoom, setTileZoom] = useState<number>(16);
 
   const resetComputed = useCallback(() => {
@@ -711,7 +713,12 @@ export function GeoProofApp() {
       if (waybackLoading) reasons.push("Wayback timeline is still loading.");
       if (!wayback) reasons.push("Wayback timeline not available for this area yet.");
       if (!waybackPicked) reasons.push("Pick two Wayback snapshots (before + after).");
-      if (!waybackStats) reasons.push("Wayback diff stats not computed yet (wait for tiles/diff to finish)." );
+      if (!waybackStats) {
+        reasons.push("Wayback diff stats not computed yet (wait for tiles/diff to finish)." );
+        if (waybackArtifacts?.diffDataUrl) {
+          reasons.push("A change mask may be visible from a previous run. Click ‘Recompute Wayback diff’ to refresh stats.");
+        }
+      }
     } else if (primarySource === "sentinel-2-l2a") {
       if (!stacS2) reasons.push("Run ‘Find imagery’ to load Sentinel‑2 imagery.");
       if ((variant === "clearest" ? s2ClearestStats : s2ClosestStats) == null)
@@ -736,6 +743,7 @@ export function GeoProofApp() {
     wayback,
     waybackPicked,
     waybackStats,
+    waybackArtifacts,
     stacS2,
     stacLandsat,
     showSecondary,
@@ -1284,6 +1292,16 @@ export function GeoProofApp() {
                 {publishLoading ? "Publishing…" : "Publish to Walrus + Sui"}
               </button>
 
+              {primarySource === "wayback" ? (
+                <button
+                  type="button"
+                  onClick={() => setWaybackComputeNonce((n) => n + 1)}
+                  className="mt-2 inline-flex h-9 w-full items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-xs font-medium text-zinc-200"
+                >
+                  Recompute Wayback diff
+                </button>
+              ) : null}
+
               {!reportDraft && !publishLoading ? (
                 <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-200">
                   <div className="font-medium text-zinc-300">Why is Publish disabled?</div>
@@ -1473,6 +1491,7 @@ export function GeoProofApp() {
                     threshold={threshold}
                     ignoreClouds={ignoreClouds}
                     ignoreDark={ignoreDark}
+                    computeNonce={waybackComputeNonce}
                     onComputed={setWaybackStats}
                     onArtifacts={setWaybackArtifacts}
                   />

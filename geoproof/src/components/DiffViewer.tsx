@@ -24,6 +24,8 @@ type Props = {
   threshold: number; // 0..255
   ignoreClouds?: boolean;
   ignoreDark?: boolean;
+  // Bump this value to force a recompute even if other inputs are unchanged.
+  computeNonce?: number;
   onComputed?: (stats: DiffStats | null) => void;
   onArtifacts?: (artifacts: { beforeDataUrl: string; afterDataUrl: string; diffDataUrl: string }) => void;
 };
@@ -244,6 +246,7 @@ export function DiffViewer({
   threshold,
   ignoreClouds = true,
   ignoreDark = false,
+  computeNonce = 0,
   onComputed,
   onArtifacts,
 }: Props) {
@@ -269,7 +272,7 @@ export function DiffViewer({
     () =>
       `${beforeUrl ?? ""}|${afterUrl ?? ""}|${threshold}|${selectionBbox?.join(",") ?? ""}|${
         beforeItemBbox?.join(",") ?? ""
-      }|${afterItemBbox?.join(",") ?? ""}|${beforeTileUrlTemplate ?? ""}|${afterTileUrlTemplate ?? ""}|${allowMissingTiles ? 1 : 0}|${tileZoom}|${ignoreClouds ? 1 : 0}|${ignoreDark ? 1 : 0}`,
+      }|${afterItemBbox?.join(",") ?? ""}|${beforeTileUrlTemplate ?? ""}|${afterTileUrlTemplate ?? ""}|${allowMissingTiles ? 1 : 0}|${tileZoom}|${ignoreClouds ? 1 : 0}|${ignoreDark ? 1 : 0}|${computeNonce}`,
     [
       beforeUrl,
       afterUrl,
@@ -283,6 +286,7 @@ export function DiffViewer({
       tileZoom,
       ignoreClouds,
       ignoreDark,
+      computeNonce,
     ],
   );
   const inputs = useMemo(
@@ -300,6 +304,7 @@ export function DiffViewer({
       tileZoom,
       ignoreClouds,
       ignoreDark,
+      computeNonce,
     }),
     [
       beforeUrl,
@@ -315,6 +320,7 @@ export function DiffViewer({
       tileZoom,
       ignoreClouds,
       ignoreDark,
+      computeNonce,
     ],
   );
 
