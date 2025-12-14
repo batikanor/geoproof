@@ -167,6 +167,7 @@ export function GeoProofApp() {
   const [publishLoading, setPublishLoading] = useState<boolean>(false);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [publishResult, setPublishResult] = useState<unknown | null>(null);
+  const [publishDiag, setPublishDiag] = useState<{ missingEnv: string[]; error: string | null } | null>(null);
 
   const [tileZoom, setTileZoom] = useState<number>(16);
 
@@ -668,6 +669,83 @@ export function GeoProofApp() {
   }, [activeComputed.artifacts, reportDraft]);
 
   const diffStats = activeComputed.stats;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/publish/diagnose", { method: "GET" });
+        const raw = (await res.json()) as unknown;
+        if (!res.ok) {
+          const msg =
+            typeof raw === "object" && raw !== null && "error" in raw && typeof (raw as { error?: unknown }).error === "string"
+              ? (raw as { error: string }).error
+              : `HTTP ${res.status}`;
+          if (!cancelled) setPublishDiag({ missingEnv: [], error: msg });
+          return;
+        }
+        const missingEnv = (() => {
+          if (typeof raw !== "object" || raw === null) return [];
+          const v = (raw as Record<string, unknown>)["missingEnv"];
+          if (!Array.isArray(v)) return [];
+          return v.filter((x): x is string => typeof x === "string");
+        })();
+        if (!cancelled) setPublishDiag({ missingEnv, error: null });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!cancelled) setPublishDiag({ missingEnv: [], error: msg });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const publishDisabledReasons = useMemo(() => {
+    const reasons: string[] = [];
+    if (publishLoading) reasons.push("Publish is in progress.");
+    if (!effectiveBbox) reasons.push("Select a region (bbox / radius / from→to).");
+
+    if (primarySource === "wayback") {
+      if (!showWayback) reasons.push("Wayback is not enabled (toggle ‘Also fetch Wayback’).");
+      if (waybackLoading) reasons.push("Wayback timeline is still loading.");
+      if (!wayback) reasons.push("Wayback timeline not available for this area yet.");
+      if (!waybackPicked) reasons.push("Pick two Wayback snapshots (before + after).");
+      if (!waybackStats) reasons.push("Wayback diff stats not computed yet (wait for tiles/diff to finish)." );
+    } else if (primarySource === "sentinel-2-l2a") {
+      if (!stacS2) reasons.push("Run ‘Find imagery’ to load Sentinel‑2 imagery.");
+      if ((variant === "clearest" ? s2ClearestStats : s2ClosestStats) == null)
+        reasons.push(`Sentinel‑2 (${variant}) diff stats not computed yet.`);
+    } else {
+      if (!showSecondary) reasons.push("Enable ‘Also fetch Landsat’ to use Landsat as primary.");
+      if (!stacLandsat) reasons.push("Run ‘Find imagery’ to load Landsat imagery.");
+      if ((variant === "clearest" ? lsClearestStats : lsClosestStats) == null)
+        reasons.push(`Landsat (${variant}) diff stats not computed yet.`);
+    }
+
+    if (publishDiag?.error) reasons.push(`Publish config check failed: ${publishDiag.error}`);
+    if (publishDiag?.missingEnv?.length) reasons.push(`Missing server env vars: ${publishDiag.missingEnv.join(", ")}`);
+
+    return reasons;
+  }, [
+    publishLoading,
+    effectiveBbox,
+    primarySource,
+    showWayback,
+    waybackLoading,
+    wayback,
+    waybackPicked,
+    waybackStats,
+    stacS2,
+    stacLandsat,
+    showSecondary,
+    variant,
+    s2ClearestStats,
+    s2ClosestStats,
+    lsClearestStats,
+    lsClosestStats,
+    publishDiag,
+  ]);
 
   return (
     <div className="min-h-screen bg-zinc-950">
@@ -1205,6 +1283,19 @@ export function GeoProofApp() {
               >
                 {publishLoading ? "Publishing…" : "Publish to Walrus + Sui"}
               </button>
+
+              {!reportDraft && !publishLoading ? (
+                <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-200">
+                  <div className="font-medium text-zinc-300">Why is Publish disabled?</div>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-zinc-400">
+                    {publishDisabledReasons.length ? (
+                      publishDisabledReasons.map((r) => <li key={r}>{r}</li>)
+                    ) : (
+                      <li>Unknown (report draft is missing).</li>
+                    )}
+                  </ul>
+                </div>
+              ) : null}
 
               {publishError ? (
                 <div className="mt-3 rounded-lg border border-red-900/40 bg-red-950/40 p-3 text-xs text-red-200">

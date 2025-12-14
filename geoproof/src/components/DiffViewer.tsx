@@ -320,8 +320,16 @@ export function DiffViewer({
 
   useEffect(() => {
     let cancelled = false;
+    // New inputs: clear previous outputs so the UI doesn't show a stale mask while we recompute.
     onComputed?.(null);
-    setState((s) => ({ ...s, key: inputs.key, progress: null }));
+    setState({
+      key: inputs.key,
+      diffUrl: null,
+      beforeCroppedUrl: null,
+      afterCroppedUrl: null,
+      error: null,
+      progress: null,
+    });
 
     async function run() {
       const canUseTiles =
@@ -541,6 +549,7 @@ export function DiffViewer({
       } catch (e: unknown) {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
+        onComputed?.(null);
         setState({
           key: inputs.key,
           diffUrl: null,
