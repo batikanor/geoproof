@@ -8,7 +8,7 @@ import { Secp256r1Keypair } from "@mysten/sui/keypairs/secp256r1";
 
 export const runtime = "nodejs";
 
-const WAL_COIN_TYPE = "0x8270feb7375eee355e64fdb69c50abb6b5f9393a722883c1cf45f8e26048810a::wal::WAL";
+const SUI_COIN_TYPE = "0x2::sui::SUI";
 
 function reqEnv(name: string): string {
   const v = process.env[name];
@@ -36,17 +36,22 @@ export async function GET() {
     const address = keypair.getPublicKey().toSuiAddress();
     const client = new SuiClient({ url, network });
 
-    const [suiBal, walBal] = await Promise.all([
-      client.getBalance({ owner: address }),
-      client.getBalance({ owner: address, coinType: WAL_COIN_TYPE }),
-    ]);
+    const all = await client.getAllBalances({ owner: address });
+    const sui = all.find((b) => b.coinType === SUI_COIN_TYPE) ?? { coinType: SUI_COIN_TYPE, totalBalance: "0" };
+
+    // WAL coin type changes across Walrus deployments; don't hardcode package ids.
+    // Instead, find any coin type ending with ::wal::WAL.
+    const wal =
+      all.find((b) => b.coinType.endsWith("::wal::WAL")) ??
+      // Fallback (older deployments): some builds used `...::wal::WAL` with different package ids.
+      { coinType: "::wal::WAL", totalBalance: "0" };
 
     return NextResponse.json({
       network,
       address,
       balances: {
-        SUI: { total: suiBal.totalBalance, coinType: suiBal.coinType },
-        WAL: { total: walBal.totalBalance, coinType: walBal.coinType },
+        SUI: { total: sui.totalBalance, coinType: sui.coinType },
+        WAL: { total: wal.totalBalance, coinType: wal.coinType },
       },
     });
   } catch (e: unknown) {
