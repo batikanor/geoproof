@@ -1449,8 +1449,54 @@ export function GeoProofApp() {
                         </ul>
                       </div>
                     ) : null}
+
+                    {publishBalance.balances.WAL.byType && Object.keys(publishBalance.balances.WAL.byType).length === 1 ? (
+                      <div className="text-[11px] leading-4 text-zinc-500">
+                        WAL by type:
+                        <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                          {Object.entries(publishBalance.balances.WAL.byType).map(([t, v]) => (
+                            <li key={t}>
+                              <span className="font-mono text-zinc-300">{(Number(v) / 1e9).toFixed(3)}</span> of{" "}
+                              <span className="font-mono text-zinc-400">{t}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
                   </div>
                 )}
+              </div>
+
+              <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-200">
+                <div className="font-medium text-zinc-300">Faucets / getting more tokens</div>
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-zinc-400">
+                  <li>
+                    Testnet WAL (via Walrus CLI):{" "}
+                    <a
+                      className="text-zinc-200 underline"
+                      href="https://docs.wal.app/docs/usage/networks#testnet-wal-faucet"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      walrus get-wal
+                    </a>
+                  </li>
+                  <li>
+                    Testnet SUI faucet:{" "}
+                    <a
+                      className="text-zinc-200 underline"
+                      href="https://docs.sui.io/guides/developer/getting-started/get-coins"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      docs
+                    </a>
+                  </li>
+                </ul>
+                <div className="mt-2 text-[11px] leading-4 text-zinc-500">
+                  Note: WAL coin types can change when Walrus Testnet redeploys. After getting WAL, refresh to confirm it
+                  matches the “Expected WAL type”.
+                </div>
               </div>
 
               <div className="mt-3 grid gap-2">
