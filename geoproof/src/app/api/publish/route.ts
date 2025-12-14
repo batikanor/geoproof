@@ -12,6 +12,7 @@ import { walrus } from "@mysten/walrus";
 import crypto from "node:crypto";
 
 import { stableStringify } from "@/lib/stableJson";
+import { extractFirstCreatedObjectId } from "@/lib/suiReports";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -264,20 +265,7 @@ export async function POST(req: Request) {
 
     digest = result.digest ?? result.effects?.transactionDigest ?? "";
 
-    const changes = result.objectChanges;
-    if (Array.isArray(changes)) {
-      const created = changes.find(
-        (c: unknown) =>
-          typeof c === "object" &&
-          c !== null &&
-          (c as { type?: unknown }).type === "created" &&
-          typeof (c as { objectType?: unknown }).objectType === "string" &&
-          (c as { objectType: string }).objectType.includes("ChangeReport"),
-      );
-      if (created && typeof (created as { objectId?: unknown }).objectId === "string") {
-        createdObjectId = (created as { objectId: string }).objectId;
-      }
-    }
+    createdObjectId = extractFirstCreatedObjectId(result.objectChanges, { objectTypeIncludes: "ChangeReport" });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return NextResponse.json(

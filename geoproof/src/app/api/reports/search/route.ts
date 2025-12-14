@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { getFullnodeUrl } from "@mysten/sui/client";
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 
+import { bboxIntersects, extractCreatedObjectIdsFromTxPage, parseBboxParam } from "@/lib/suiReports";
+
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
@@ -40,25 +42,6 @@ type TxPage = {
   nextCursor?: string | null;
   hasNextPage?: boolean;
 };
-
-function parseBboxParam(b: string | null): [number, number, number, number] | null {
-  if (!b) return null;
-  try {
-    const parts = b.split(",").map((x) => Number(x.trim()));
-    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
-    const [minLng, minLat, maxLng, maxLat] = parts;
-    if (minLng >= maxLng || minLat >= maxLat) return null;
-    return [minLng, minLat, maxLng, maxLat];
-  } catch {
-    return null;
-  }
-}
-
-function bboxIntersects(a: [number, number, number, number], b: [number, number, number, number]) {
-  const [aMinX, aMinY, aMaxX, aMaxY] = a;
-  const [bMinX, bMinY, bMaxX, bMaxY] = b;
-  return aMinX <= bMaxX && aMaxX >= bMinX && aMinY <= bMaxY && aMaxY >= bMinY;
-}
 
 function bytesToString(v: unknown): string {
   if (!Array.isArray(v)) return "";
@@ -160,23 +143,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Failed to query Sui transactions." }, { status: 502 });
   }
 
-  const createdIds: Array<{ objectId: string; digest: string }> = [];
-  for (const tx of txs.data) {
-    const digest = tx.digest;
-    if (!digest) continue;
-    const changes = tx.objectChanges;
-    if (!Array.isArray(changes)) continue;
-    for (const c of changes) {
-      if (typeof c !== "object" || c === null) continue;
-      const type = (c as { type?: unknown }).type;
-      const objectType = (c as { objectType?: unknown }).objectType;
-      const objectId = (c as { objectId?: unknown }).objectId;
-      if (type !== "created") continue;
-      if (typeof objectId !== "string") continue;
-      if (typeof objectType !== "string" || !objectType.includes("ChangeReport")) continue;
-      createdIds.push({ objectId, digest });
-    }
-  }
+  const createdIds = extractCreatedObjectIdsFromTxPage(txs, { objectTypeIncludes: "ChangeReport" });
 
   let objs: Awaited<ReturnType<typeof client.multiGetObjects>>;
   try {
