@@ -101,7 +101,9 @@ export async function POST(req: Request) {
   // HF Inference API: OWL-ViT-style open-vocabulary detection uses base64 image + candidate_labels.
   // (See HF task docs for object detection request shape; some models accept extra parameters like candidate labels.)
   // https://huggingface.co/docs/inference-providers/en/tasks/object-detection
-  const res = await fetch(`https://api-inference.huggingface.co/models/${encodeURIComponent(model)}`, {
+  // HF Inference API is routed via router.huggingface.co.
+  // https://huggingface.co/docs/inference-providers/en/providers/hf-inference
+  const res = await fetch(`https://router.huggingface.co/hf-inference/models/${encodeURIComponent(model)}`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${hfKey}`,
